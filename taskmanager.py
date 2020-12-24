@@ -14,7 +14,9 @@ class PyTorchLinearRegression(nn.Module):
         return self.a + self.b * x
 
 model = PyTorchLinearRegression()
-# print(str(model.state_dict()))
+print(str(model.state_dict()))
+# torch.save(model.state_dict(), 'model.pt')
 buffer = io.BytesIO()
 torch.save(model.state_dict(), buffer)
-print(type(buffer.getvalue()))
+b64_data = base64.b64encode(buffer.getvalue())
+print(b64_data.decode('utf-8'))
