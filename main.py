@@ -7,7 +7,7 @@ from torch.utils.data.dataset import random_split
 from torch.utils.data import TensorDataset
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
+print(device)
 # y = 2 + 5x + epsilon(noise)
 np.random.seed(7)
 x = np.random.rand(100, 1)
@@ -51,7 +51,6 @@ def build_train_step(model, loss_fn, optimizer):
         optimizer.step()
         optimizer.zero_grad()
 
-        print("Model: \n", model.state_dict(), "\n")
         return loss.item()
     return train_step
 
@@ -66,7 +65,6 @@ for epoch in range(epochs):
         
         loss = train_step(x_batch, y_batch)
         losses.append(loss)
-    input("Press Enter to continue...")
 
 with torch.no_grad():
     for x, y in val_loader:
