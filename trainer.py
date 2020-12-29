@@ -100,12 +100,11 @@ def on_message(ws, message):
     buffer.write(modelData)
     buffer.seek(0)
     model, train_step = loadModel(buffer)
-    
     losses = []
+
     for x_batch, y_batch in train_loader:
         x_batch = x_batch.to(device)
         y_batch = y_batch.to(device)
-        
         loss = train_step(x_batch, y_batch)
         losses.append(loss)
 
