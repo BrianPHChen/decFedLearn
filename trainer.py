@@ -1,21 +1,31 @@
 import numpy as np
 import torch
 from torch import nn
-from torch import onnx
 from torch.utils.data import TensorDataset
+from torch.utils.data import DataLoader
+from torch import optim
 import base64
 import io
 import json
 import websocket
 import requests
 
-# arr = np.loadtxt("data0.csv",delimiter=',')
-# x, y = np.split(arr, 2, axis=1)
+try:
+    import thread
+except ImportError:
+    import _thread as thread
+import time
 
-# x_tensor = torch.from_numpy(x)
-# y_tensor = torch.from_numpy(y)
+arr = np.loadtxt("data0.csv",delimiter=',')
+x, y = np.split(arr, 2, axis=1)
+x_tensor = torch.from_numpy(x)
+y_tensor = torch.from_numpy(y)
+dataset = TensorDataset(x_tensor, y_tensor)
+train_loader = DataLoader(dataset=dataset, batch_size=16, shuffle=True)
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# dataset = TensorDataset(x_tensor, y_tensor)
+trainingRound = 0
+training = False
 
 class PyTorchLinearRegression(nn.Module):
     def __init__(self):
@@ -26,16 +36,33 @@ class PyTorchLinearRegression(nn.Module):
     def forward(self, x):
         return self.a + self.b * x
 
-try:
-    import thread
-except ImportError:
-    import _thread as thread
-import time
+def build_train_step(model, loss_fn, optimizer):
+    def train_step(x, y):
+        model.train()
+        yhat = model(x)
+        loss = loss_fn(y, yhat)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        return loss.item()
+    return train_step
+
+def loadModel(buffer):
+    model = PyTorchLinearRegression().to(device)
+    lr = 1e-1
+    MSELoss = nn.MSELoss(reduction='mean')
+    optimizer = optim.SGD(model.parameters(), lr=lr)
+    model.load_state_dict(torch.load(buffer))
+    return model, build_train_step(model, MSELoss, optimizer)
 
 def on_message(ws, message):
+    global trainingRound
+    global training
+
     blockObj = json.loads(message)
     blockHeight = blockObj["result"]["data"]["value"]["block"]["header"]["height"]
-    print("block: ", blockHeight)
+    # print("block: ", blockHeight)
     url = "http://127.0.0.1:26657"
 
     # check round
@@ -45,27 +72,64 @@ def on_message(ws, message):
         "jsonrpc": "2.0",
         "id": 1,
     }
+
+    response = requests.post(url, json=payload).json()
+    roundVal = base64.b64decode(response['result']['response']['value'])
+    roundVal = roundVal.decode('utf-8')
+    roundVal = int(roundVal)
+
+    if training == True or roundVal == 0:
+        return
+    else :
+        training = True
+
+    trainingRound = roundVal + 1
+    print("[Start Training] Round:", trainingRound)
+    payload = {
+        "method": "abci_query",
+        "params": {"path": "model"},
+        "jsonrpc": "2.0",
+        "id": 1,
+    }
+
     response = requests.post(url, json=payload).json()
     value = base64.b64decode(response['result']['response']['value'])
-    value = value.decode('utf-8')
 
-    if int(value) > 0 :
-        payload = {
-            "method": "abci_query",
-            "params": {"path": "model"},
-            "jsonrpc": "2.0",
-            "id": 1,
-        }
-        response = requests.post(url, json=payload).json()
-        value = base64.b64decode(response['result']['response']['value'])
+    modelData = base64.b64decode(value)
+    buffer = io.BytesIO()
+    buffer.write(modelData)
+    buffer.seek(0)
+    model, train_step = loadModel(buffer)
+    
+    losses = []
+    for x_batch, y_batch in train_loader:
+        x_batch = x_batch.to(device)
+        y_batch = y_batch.to(device)
+        
+        loss = train_step(x_batch, y_batch)
+        losses.append(loss)
 
-        modelData = base64.b64decode(value)
-        buffer = io.BytesIO()
-        buffer.write(modelData)
-        buffer.seek(0)
-        model = PyTorchLinearRegression()
-        model.load_state_dict(torch.load(buffer))
-        print(model.state_dict())
+    print(model.state_dict())
+    print(losses[-1])
+
+    buffer.seek(0)
+    buffer.truncate(0)
+    torch.save(model.state_dict(), buffer)
+    b64_data = base64.b64encode(buffer.getvalue())
+    model = b64_data.decode('utf-8')
+
+    modelTx = {"cid": 0, "round": trainingRound, "model": model}
+    modelTx = json.dumps(modelTx)
+    modelB64Str = base64.b64encode(modelTx.encode('utf-8')).decode('utf-8')
+    payload = {
+        "method": "broadcast_tx_sync",
+        "params": [modelB64Str],
+        "jsonrpc": "2.0",
+        "id": 1,
+    }
+    response = requests.post(url, json=payload).json()
+    training = False
+
 
 def on_error(ws, error):
     print(error)
@@ -88,13 +152,3 @@ if __name__ == "__main__":
                               on_close = on_close)
     ws.on_open = on_open
     ws.run_forever()
-
-# data = 'UEsDBAAACAgAAAAAAAAAAAAAAAAAAAAAAAAQABIAYXJjaGl2ZS9kYXRhLnBrbEZCDgBaWlpaWlpaWlpaWlpaWoACY2NvbGxlY3Rpb25zCk9yZGVyZWREaWN0CnEAKVJxAShYAQAAAGFxAmN0b3JjaC5fdXRpbHMKX3JlYnVpbGRfdGVuc29yX3YyCnEDKChYBwAAAHN0b3JhZ2VxBGN0b3JjaApGbG9hdFN0b3JhZ2UKcQVYCAAAADM1OTk5MDcycQZYAwAAAGNwdXEHSwF0cQhRSwBLAYVxCUsBhXEKiWgAKVJxC3RxDFJxDVgBAAAAYnEOaAMoKGgEaAVYCAAAADY3ODQwMDE2cQ9oB0sBdHEQUUsASwGFcRFLAYVxEoloAClScRN0cRRScRV1fXEWWAkAAABfbWV0YWRhdGFxF2gAKVJxGFgAAAAAcRl9cRpYBwAAAHZlcnNpb25xG0sBc3NzYi5QSwcIK7kLYCQBAAAkAQAAUEsDBAAACAgAAAAAAAAAAAAAAAAAAAAAAAAVABkAYXJjaGl2ZS9kYXRhLzM1OTk5MDcyRkIVAFpaWlpaWlpaWlpaWlpaWlpaWlpaWuquiD1QSwcIeFBS4AQAAAAEAAAAUEsDBAAACAgAAAAAAAAAAAAAAAAAAAAAAAAVADkAYXJjaGl2ZS9kYXRhLzY3ODQwMDE2RkI1AFpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaEF1bPlBLBwhUrBeNBAAAAAQAAABQSwMEAAAICAAAAAAAAAAAAAAAAAAAAAAAAA8APwBhcmNoaXZlL3ZlcnNpb25GQjsAWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlozClBLBwjRnmdVAgAAAAIAAABQSwECAAAAAAgIAAAAAAAAK7kLYCQBAAAkAQAAEAAAAAAAAAAAAAAAAAAAAAAAYXJjaGl2ZS9kYXRhLnBrbFBLAQIAAAAACAgAAAAAAAB4UFLgBAAAAAQAAAAVAAAAAAAAAAAAAAAAAHQBAABhcmNoaXZlL2RhdGEvMzU5OTkwNzJQSwECAAAAAAgIAAAAAAAAVKwXjQQAAAAEAAAAFQAAAAAAAAAAAAAAAADUAQAAYXJjaGl2ZS9kYXRhLzY3ODQwMDE2UEsBAgAAAAAICAAAAAAAANGeZ1UCAAAAAgAAAA8AAAAAAAAAAAAAAAAAVAIAAGFyY2hpdmUvdmVyc2lvblBLBgYsAAAAAAAAAB4DLQAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAABAQAAAAAAANICAAAAAAAAUEsGBwAAAADTAwAAAAAAAAEAAABQSwUGAAAAAAQABAABAQAA0gIAAAAA'
-# data = base64.b64decode(data.encode('utf-8'))
-# buffer = io.BytesIO()
-# buffer.write(data)
-# buffer.seek(0)
-# model = PyTorchLinearRegression()
-# model.load_state_dict(torch.load(buffer))
-
-# print(model.state_dict())
